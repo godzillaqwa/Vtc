@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Mining Operations</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+    body { margin:0; background:#0a0d12; color:#edf1f7; }
+    header { padding:28px 32px 18px; border-bottom:1px solid #202631; display:flex; justify-content:space-between; gap:20px; align-items:end; }
+    h1 { margin:0 0 6px; font-size:26px; } p { margin:0; color:#9ca7b6; }
+    main { padding:24px 32px 48px; max-width:1400px; margin:auto; }
+    .grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:14px; margin-bottom:18px; }
+    .card { background:#10151d; border:1px solid #202631; border-radius:12px; padding:18px; }
+    .label { color:#8995a5; font-size:12px; text-transform:uppercase; letter-spacing:.08em; }
+    .value { font-size:24px; font-weight:700; margin-top:8px; }
+    .sub { color:#8d98a8; font-size:12px; margin-top:6px; }
+    .status { display:inline-flex; align-items:center; gap:7px; font-size:12px; font-weight:700; }
+    .dot { width:8px; height:8px; border-radius:50%; background:#667080; }
+    .ok .dot { background:#42c98a; } .bad .dot { background:#e06b75; }
+    table { width:100%; border-collapse:collapse; } th,td { text-align:left; padding:12px 10px; border-bottom:1px solid #202631; font-size:13px; } th { color:#8995a5; font-weight:600; }
+    .section { margin-top:18px; } .section h2 { font-size:16px; margin:0 0 10px; }
+    .banner { background:#17130d; border:1px solid #51401d; color:#d8bd78; border-radius:10px; padding:12px 14px; margin-bottom:18px; }
+    .refresh { color:#8d98a8; font-size:12px; }
+    @media(max-width:900px){ .grid{grid-template-columns:repeat(2,1fr)} header{padding:20px} main{padding:18px} }
+    @media(max-width:560px){ .grid{grid-template-columns:1fr} }
+  </style>
+</head>
+<body>
+<header>
+  <div><h1 id="company">Mining Operations</h1><p id="site">Live operations dashboard</p></div>
+  <div class="refresh" id="updated">Loading…</div>
+</header>
+<main>
+  <div class="banner">Read-only operations view. Values are shown only when returned by configured live integrations; this dashboard never fabricates miner telemetry, rewards, balances, or payouts.</div>
+  <section class="grid">
+    <div class="card"><div class="label">5m Hashrate</div><div class="value" id="hr5">—</div><div class="sub" id="hrunit">Not connected</div></div>
+    <div class="card"><div class="label">24h Hashrate</div><div class="value" id="hr24">—</div><div class="sub">Pool-reported</div></div>
+    <div class="card"><div class="label">Today Reward</div><div class="value" id="reward">—</div><div class="sub">BTC reported by pool</div></div>
+    <div class="card"><div class="label">Pool Balance</div><div class="value" id="balance">—</div><div class="sub">BTC reported by pool</div></div>
+  </section>
+
+  <section class="grid">
+    <div class="card"><div class="label">Workers Online</div><div class="value" id="workers">—</div></div>
+    <div class="card"><div class="label">Workers Low</div><div class="value" id="low">—</div></div>
+    <div class="card"><div class="label">Workers Offline</div><div class="value" id="off">—</div></div>
+    <div class="card"><div class="label">All-Time Reward</div><div class="value" id="alltime">—</div><div class="sub">BTC reported by pool</div></div>
+  </section>
+
+  <section class="card section">
+    <h2>Workers</h2>
+    <div id="workerStatus" class="status"><span class="dot"></span>Checking live pool connection…</div>
+    <table><thead><tr><th>Worker</th><th>State</th><th>5m</th><th>24h</th><th>Shares 24h</th><th>Last Share</th></tr></thead><tbody id="workerRows"></tbody></table>
+  </section>
+
+  <section class="card section">
+    <h2>Recent On-chain Payouts</h2>
+    <div id="payoutStatus" class="status"><span class="dot"></span>Checking…</div>
+    <table><thead><tr><th>Status</th><th>BTC</th><th>Fee BTC</th><th>Destination</th><th>Transaction</th></tr></thead><tbody id="payoutRows"></tbody></table>
+  </section>
+
+  <section class="card section">
+    <h2>Bitcoin Payout Address</h2>
+    <div id="walletStatus" class="status"><span class="dot"></span>Checking…</div>
+    <p id="walletText" style="margin-top:10px;word-break:break-all"></p>
+  </section>
+</main>
+<script>
+const fmt = (v, digits=6) => v === null || v === undefined ? '—' : Number(v).toLocaleString(undefined,{maximumFractionDigits:digits});
+const hr = (v, unit) => v === null || v === undefined ? '—' : fmt(v, 2) + ' ' + (unit || '');
+const btc = sats => sats == null ? '—' : (Number(sats)/1e8).toFixed(8);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+async function load() {
+  const r = await fetch('/api/overview', {cache:'no-store'});
+  const d = await r.json();
+  document.getElementById('company').textContent = d.company;
+  document.getElementById('site').textContent = d.site + ' · read-only';
+  document.getElementById('updated').textContent = 'Updated ' + new Date(d.generatedAt).toLocaleTimeString();
+
+  const p = d.pool;
+  if (p?.connected) {
+    document.getElementById('hr5').textContent = hr(p.hashRate5m, p.hashRateUnit);
+    document.getElementById('hr24').textContent = hr(p.hashRate24h, p.hashRateUnit);
+    document.getElementById('hrunit').textContent = p.username ? 'Account: ' + p.username : 'Live pool data';
+    document.getElementById('reward').textContent = p.todayReward == null ? '—' : p.todayReward + ' BTC';
+    document.getElementById('balance').textContent = p.currentBalance == null ? '—' : p.currentBalance + ' BTC';
+    document.getElementById('workers').textContent = p.okWorkers ?? '—';
+    document.getElementById('low').textContent = p.lowWorkers ?? '—';
+    document.getElementById('off').textContent = p.offWorkers ?? '—';
+    document.getElementById('alltime').textContent = p.allTimeReward == null ? '—' : p.allTimeReward + ' BTC';
+  } else {
+    ['hr5','hr24','reward','balance','workers','low','off','alltime'].forEach(id=>document.getElementById(id).textContent='—');
+    document.getElementById('hrunit').textContent = p?.reason === 'NOT_CONFIGURED' ? 'Braiins API not configured' : 'Live integration error';
+  }
+
+  const ws = d.workers;
+  document.getElementById('workerStatus').className = 'status ' + (ws?.connected ? 'ok' : 'bad');
+  document.getElementById('workerStatus').innerHTML = '<span class="dot"></span>' + (ws?.connected ? 'Live worker telemetry' : 'Workers unavailable: ' + esc(ws?.reason || 'ERROR'));
+  document.getElementById('workerRows').innerHTML = ws?.items?.map(w => '<tr><td>'+esc(w.name)+'</td><td>'+esc(w.state)+'</td><td>'+hr(w.hashRate5m,w.hashRateUnit)+'</td><td>'+hr(w.hashRate24h,w.hashRateUnit)+'</td><td>'+fmt(w.shares24h,0)+'</td><td>'+esc(w.lastShare ? new Date(w.lastShare).toLocaleString() : '—')+'</td></tr>').join('') || '';
+
+  const ps = d.payouts;
+  document.getElementById('payoutStatus').className = 'status ' + (ps?.connected ? 'ok' : 'bad');
+  document.getElementById('payoutStatus').innerHTML = '<span class="dot"></span>' + (ps?.connected ? 'Live payout records' : 'Payouts unavailable: ' + esc(ps?.reason || 'ERROR'));
+  document.getElementById('payoutRows').innerHTML = ps?.onchain?.map(p => '<tr><td>'+esc(p.status)+'</td><td>'+btc(p.amountSats)+'</td><td>'+btc(p.feeSats)+'</td><td>'+esc(p.destination)+'</td><td>'+ (p.txId ? '<a href="https://mempool.space/tx/'+encodeURIComponent(p.txId)+'" target="_blank" rel="noreferrer" style="color:#8eb7ff">'+esc(p.txId.slice(0,14))+'…</a>' : '—') +'</td></tr>').join('') || '';
+
+  const w = d.wallet;
+  document.getElementById('walletStatus').className = 'status ' + (w?.connected ? 'ok' : 'bad');
+  document.getElementById('walletStatus').innerHTML = '<span class="dot"></span>' + (w?.connected ? 'Live Bitcoin mainnet address data' : 'Wallet integration: ' + esc(w?.reason || 'ERROR'));
+  document.getElementById('walletText').textContent = w?.address || 'No payout address configured';
+}
+load().catch(e => { document.getElementById('updated').textContent = 'Dashboard error: ' + e.message; });
+setInterval(load, 30000);
+</script>
+</body>
+</html>
