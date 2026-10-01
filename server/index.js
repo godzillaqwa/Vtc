@@ -1,188 +1,28 @@
 import 'dotenv/config';
 import express from 'express';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import {fileURLToPath} from 'node:url';
+import crypto from 'node:crypto';
+import {createProviders,env} from './providers.js';
+import {appendAudit,dbConfigured,query} from './db.js';
+import {requireApiKey,requireRole} from './auth.js';
+import {profitability,reconcile} from './calculations.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const app = express();
-const port = Number(process.env.PORT || 3000);
-
-app.disable('x-powered-by');
-app.use(express.json());
-app.use(express.static(path.join(__dirname, '..', 'public')));
-
-const company = process.env.COMPANY_NAME || 'Mining Operations';
-const site = process.env.SITE_NAME || 'Unconfigured Site';
-const braiinsToken = process.env.BRAIINS_POOL_TOKEN?.trim();
-const payoutAddress = process.env.BITCOIN_PAYOUT_ADDRESS?.trim();
-
-async function getJson(url, options = {}) {
-  const response = await fetch(url, {
-    ...options,
-    headers: {
-      accept: 'application/json',
-      ...(options.headers || {})
-    },
-    signal: AbortSignal.timeout(10000)
-  });
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status} from ${new URL(url).hostname}`);
-  }
-  return response.json();
-}
-
-function requireBraiins() {
-  if (!braiinsToken) {
-    const error = new Error('BRAIINS_POOL_TOKEN is not configured');
-    error.code = 'NOT_CONFIGURED';
-    throw error;
-  }
-}
-
-async function braiins(endpoint) {
-  requireBraiins();
-  return getJson(`https://pool.braiins.com${endpoint}`, {
-    headers: { 'Pool-Auth-Token': braiinsToken }
-  });
-}
-
-function unavailable(source, error) {
-  return {
-    source,
-    connected: false,
-    reason: error?.code === 'NOT_CONFIGURED' ? 'NOT_CONFIGURED' : 'ERROR',
-    error: error?.message || 'Unknown error'
-  };
-}
-
-app.get('/api/health', (_req, res) => {
-  res.json({
-    ok: true,
-    service: 'mining-operations',
-    readOnly: process.env.READ_ONLY !== 'false',
-    integrations: {
-      braiinsPool: Boolean(braiinsToken),
-      bitcoinAddress: Boolean(payoutAddress)
-    }
-  });
-});
-
-app.get('/api/overview', async (_req, res) => {
-  const result = {
-    company,
-    site,
-    generatedAt: new Date().toISOString(),
-    readOnly: process.env.READ_ONLY !== 'false',
-    pool: null,
-    workers: null,
-    payouts: null,
-    wallet: null
-  };
-
-  try {
-    const data = await braiins('/accounts/profile/json/btc/');
-    const btc = data?.btc;
-    result.pool = {
-      connected: true,
-      username: data?.username || null,
-      hashRateUnit: btc?.hash_rate_unit || null,
-      hashRate5m: btc?.hash_rate_5m ?? null,
-      hashRate60m: btc?.hash_rate_60m ?? null,
-      hashRate24h: btc?.hash_rate_24h ?? null,
-      todayReward: btc?.today_reward ?? null,
-      estimatedReward: btc?.estimated_reward ?? null,
-      currentBalance: btc?.current_balance ?? null,
-      allTimeReward: btc?.all_time_reward ?? null,
-      okWorkers: btc?.ok_workers ?? 0,
-      lowWorkers: btc?.low_workers ?? 0,
-      offWorkers: btc?.off_workers ?? 0,
-      disabledWorkers: btc?.dis_workers ?? 0,
-      shares24h: btc?.shares_24h ?? null
-    };
-  } catch (error) {
-    result.pool = unavailable('Braiins Pool', error);
-  }
-
-  try {
-    const data = await braiins('/accounts/workers/json/btc');
-    const workers = data?.btc?.workers || {};
-    result.workers = {
-      connected: true,
-      items: Object.entries(workers).map(([name, worker]) => ({
-        name,
-        state: worker.state || 'unknown',
-        hashRateUnit: worker.hash_rate_unit || null,
-        hashRate5m: worker.hash_rate_5m ?? null,
-        hashRate60m: worker.hash_rate_60m ?? null,
-        hashRate24h: worker.hash_rate_24h ?? null,
-        shares24h: worker.shares_24h ?? null,
-        lastShare: worker.last_share ? new Date(worker.last_share * 1000).toISOString() : null
-      }))
-    };
-  } catch (error) {
-    result.workers = unavailable('Braiins Workers', error);
-  }
-
-  try {
-    const to = new Date().toISOString().slice(0, 10);
-    const fromDate = new Date(Date.now() - 30 * 86400000);
-    const from = fromDate.toISOString().slice(0, 10);
-    const data = await braiins(`/accounts/payouts/json/btc?from=${from}&to=${to}`);
-    result.payouts = {
-      connected: true,
-      onchain: (data?.onchain || []).map((p) => ({
-        status: p.status,
-        amountSats: p.amount_sats ?? null,
-        feeSats: p.fee_sats ?? null,
-        destination: p.destination ?? null,
-        txId: p.tx_id ?? null,
-        requestedAt: p.requested_at_ts ? new Date(p.requested_at_ts * 1000).toISOString() : null,
-        resolvedAt: p.resolved_at_ts ? new Date(p.resolved_at_ts * 1000).toISOString() : null
-      }))
-    };
-  } catch (error) {
-    result.payouts = unavailable('Braiins Payouts', error);
-  }
-
-  if (payoutAddress) {
-    try {
-      const data = await getJson(`https://mempool.space/api/address/${encodeURIComponent(payoutAddress)}`);
-      result.wallet = {
-        connected: true,
-        address: payoutAddress,
-        funded: data?.chain_stats?.funded_txo_sum ?? 0,
-        spent: data?.chain_stats?.spent_txo_sum ?? 0,
-        transactionCount: data?.chain_stats?.tx_count ?? 0,
-        mempoolTxCount: data?.mempool_stats?.tx_count ?? 0
-      };
-    } catch (error) {
-      result.wallet = unavailable('Bitcoin mainnet address', error);
-      result.wallet.address = payoutAddress;
-    }
-  } else {
-    result.wallet = unavailable('Bitcoin mainnet address', Object.assign(new Error('BITCOIN_PAYOUT_ADDRESS is not configured'), { code: 'NOT_CONFIGURED' }));
-  }
-
-  res.json(result);
-});
-
-app.get('/api/workers', async (_req, res) => {
-  try {
-    const data = await braiins('/accounts/workers/json/btc');
-    const workers = data?.btc?.workers || {};
-    res.json({
-      connected: true,
-      items: Object.entries(workers).map(([name, worker]) => ({ name, ...worker }))
-    });
-  } catch (error) {
-    res.status(error?.code === 'NOT_CONFIGURED' ? 503 : 502).json(unavailable('Braiins Workers', error));
-  }
-});
-
-app.get('*', (_req, res) => {
-  res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
-});
-
-app.listen(port, () => {
-  console.log(`Mining operations dashboard listening on http://localhost:${port}`);
-});
+const app=express(),root=path.dirname(fileURLToPath(import.meta.url)),port=Number(env('PORT')||3000);
+const company=env('COMPANY_NAME')||'Mining Operations',site=env('SITE_NAME')||'Unconfigured Site',address=env('BITCOIN_PAYOUT_ADDRESS');
+app.disable('x-powered-by');app.use(express.json({limit:'1mb'}));app.use(express.static(path.join(root,'..','public')));app.use('/api',requireApiKey);
+async function json(url){const r=await fetch(url,{headers:{accept:'application/json'},signal:AbortSignal.timeout(10000)});if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}
+function normalize(x){return {provider:x.provider,coin:x.coin,source:x.source,pool:x.pool,workers:Array.isArray(x.workers)?x.workers:Object.entries(x.workers||{}).map(([name,w])=>({name,...w})),payouts:x.payouts||[]};}
+async function collect(){const out=[];for(const p of createProviders()){try{const d=normalize(await p.overview());out.push({...d,connected:true});if(dbConfigured()){const raw=JSON.stringify(d),hash=crypto.createHash('sha256').update(raw).digest('hex');await query('INSERT INTO telemetry_snapshots(provider,coin,payload_json,payload_hash) VALUES($1,$2,$3::jsonb,$4) ON CONFLICT DO NOTHING',[d.provider,d.coin,raw,hash]);await appendAudit({type:'TELEMETRY_CAPTURED',provider:d.provider,coin:d.coin,payloadHash:hash});}}catch(e){out.push({provider:p.name,connected:false,error:e.message});}}return out;}
+app.get('/api/health',(_q,r)=>r.json({ok:true,readOnly:env('READ_ONLY')!=='false',database:dbConfigured(),providers:createProviders().map(p=>p.name)}));
+app.get('/api/overview',async(_q,r)=>{let wallet={connected:false,reason:'NOT_CONFIGURED'};if(address)try{wallet={connected:true,address,chain:await json('https://mempool.space/api/address/'+encodeURIComponent(address))};}catch(e){wallet={connected:false,address,error:e.message};}r.json({company,site,generatedAt:new Date().toISOString(),readOnly:env('READ_ONLY')!=='false',integrations:await collect(),wallet});});
+app.get('/api/providers',async(_q,r)=>r.json(await collect()));
+app.get('/api/audit',requireRole('admin','auditor'),async(_q,r)=>{if(!dbConfigured())return r.status(503).json({error:'DATABASE_NOT_CONFIGURED'});r.json((await query('SELECT id,event_type,occurred_at,payload_hash FROM audit_events ORDER BY id DESC LIMIT 500')).rows);});
+app.get('/api/fleet/assets',async(_q,r)=>{if(!dbConfigured())return r.status(503).json({error:'DATABASE_NOT_CONFIGURED'});r.json((await query('SELECT * FROM fleet_assets ORDER BY asset_tag')).rows);});
+app.post('/api/fleet/assets',requireRole('admin','operator'),async(q,r)=>{if(!dbConfigured())return r.status(503).json({error:'DATABASE_NOT_CONFIGURED'});const b=q.body;if(!b.assetTag)return r.status(400).json({error:'assetTag required'});const x=(await query('INSERT INTO fleet_assets(asset_tag,serial_number,model,site,expected_count) VALUES($1,$2,$3,$4,$5) RETURNING *',[b.assetTag,b.serialNumber||null,b.model||null,b.site||site,b.expectedCount||1])).rows[0];await appendAudit({type:'FLEET_ASSET_CREATED',assetTag:b.assetTag});r.status(201).json(x);});
+app.get('/api/energy/readings',async(q,r)=>{if(!dbConfigured())return r.status(503).json({error:'DATABASE_NOT_CONFIGURED'});r.json((await query('SELECT * FROM energy_readings WHERE reading_at>=COALESCE($1,NOW()-INTERVAL \'24 hours\') AND reading_at<=COALESCE($2,NOW()) ORDER BY reading_at DESC',[q.query.from||null,q.query.to||null])).rows);});
+app.post('/api/energy/readings',requireRole('admin','operator'),async(q,r)=>{if(!dbConfigured())return r.status(503).json({error:'DATABASE_NOT_CONFIGURED'});const b=q.body;if(!b.meterId||!b.site||!b.readingAt||b.kwh==null||!b.source)return r.status(400).json({error:'meterId, site, readingAt, kwh and source are required'});const x=(await query('INSERT INTO energy_readings(meter_id,site,reading_at,kwh,source) VALUES($1,$2,$3,$4,$5) ON CONFLICT(meter_id,reading_at) DO UPDATE SET kwh=EXCLUDED.kwh,source=EXCLUDED.source RETURNING *',[b.meterId,b.site,b.readingAt,b.kwh,b.source])).rows[0];await appendAudit({type:'ENERGY_READING_RECORDED',meterId:b.meterId,readingAt:b.readingAt,kwh:b.kwh,source:b.source});r.status(201).json(x);});
+app.post('/api/reconciliation',requireRole('admin','auditor'),async(q,r)=>{if(!dbConfigured())return r.status(503).json({error:'DATABASE_NOT_CONFIGURED'});const x=reconcile(q.body);const b=q.body;const row=(await query('INSERT INTO reconciliation_records(period_start,period_end,provider,pool_reward,onchain_payout,variance,status) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *',[b.periodStart,b.periodEnd,b.provider,x.poolReward,x.onchainPayout,x.variance,x.status])).rows[0];await appendAudit({type:'RECONCILIATION_RECORDED',provider:b.provider,...x});r.status(201).json({record:row,...x});});
+app.post('/api/profitability',requireRole('admin','operator','auditor'),(q,r)=>r.json(profitability(q.body)));
+app.get('*',(_q,r)=>r.sendFile(path.join(root,'..','public','index.html')));
+app.listen(port,()=>console.log('Mining operations dashboard listening on port '+port));
