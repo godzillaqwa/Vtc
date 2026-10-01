@@ -1,0 +1,1 @@
+import 'dotenv/config';import fs from 'node:fs/promises';import {query} from './db.js';const sql=await fs.readFile(new URL('./schema.sql',import.meta.url),'utf8');await query(sql);console.log('Database schema applied');process.exit(0);
